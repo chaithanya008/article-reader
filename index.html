@@ -212,20 +212,68 @@ const PROXIES = [
   { name: 'allorigins.win', url: (u) => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`, parse: (r) => r.json().then(j => j.contents) },
 ];
 
-async function fetchHTML(url) {
-  let lastErr;
+const PAYWALL_HINTS = [
+  'subscribe to read', 'subscription required', 'sign in to continue',
+  'create an account', 'register to read', 'paywall', 'premium content',
+  'members only', 'subscriber-only', 'already a subscriber',
+  'continue reading with', 'unlock this article', 'get unlimited access',
+];
+
+function isConsentPage(html) {
+  const lower = html.toLowerCase();
+  return lower.includes('consent.google') ||
+    lower.includes('bevor sie zu google') ||
+    lower.includes('before you continue to google') ||
+    lower.includes('consent.youtube') ||
+    (lower.includes('cookie') && lower.includes('consent') && !lower.includes('<article'));
+}
+
+function looksPaywalled(html) {
+  const textOnly = html.replace(/<[^>]+>/g, '');
+  if (textOnly.trim().length < 500) return true;
+  const lower = html.toLowerCase();
+  return PAYWALL_HINTS.some((hint) => lower.includes(hint));
+}
+
+async function tryProxy(url) {
   for (const proxy of PROXIES) {
     try {
       const res = await fetch(proxy.url(url));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) continue;
       const text = await proxy.parse(res);
       if (text && text.length > 500) return text;
-      throw new Error('Response too short');
-    } catch (err) {
-      lastErr = err;
-    }
+    } catch {}
   }
-  throw new Error(`All proxies failed. Last error: ${lastErr?.message}. Try pasting the HTML directly.`);
+  return null;
+}
+
+async function fetchHTML(url) {
+  // 1. Direct fetch via proxy.
+  let html = await tryProxy(url);
+  if (html && !looksPaywalled(html)) return html;
+
+  // 2. Try Google Cache via proxy.
+  const cacheUrl = `https://webcache.googleusercontent.com/search?q=cache:${encodeURIComponent(url)}&hl=en&gl=us`;
+  const cacheHtml = await tryProxy(cacheUrl);
+  if (cacheHtml && cacheHtml.length > 1000 && !isConsentPage(cacheHtml)) return cacheHtml;
+
+  // 3. Try Wayback Machine via proxy.
+  try {
+    const wbRes = await fetch(PROXIES[0].url(`https://archive.org/wayback/available?url=${encodeURIComponent(url)}`));
+    if (wbRes.ok) {
+      const wbText = await wbRes.text();
+      const wbJson = JSON.parse(wbText);
+      const snapUrl = wbJson?.archived_snapshots?.closest?.url;
+      if (snapUrl) {
+        const wbHtml = await tryProxy(snapUrl);
+        if (wbHtml && wbHtml.length > 1000) return wbHtml;
+      }
+    }
+  } catch {}
+
+  // 4. Return whatever we got, even if paywalled.
+  if (html) return html;
+  throw new Error('All sources failed. Try pasting the HTML directly.');
 }
 
 // ── Article parsing (uses DOMParser) ──────────────────────────────
@@ -416,5 +464,7 @@ parseBtn.addEventListener('click', () => {
   }
 });
 </script>
+<script data-goatcounter="https://chaithanya789.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
 </body>
 </html>
