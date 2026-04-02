@@ -95,6 +95,10 @@
     }
     .error-msg.visible { display: block; }
 
+    .disclaimer {
+      margin-top: 0.75rem; font-size: 0.85rem; color: var(--muted);
+    }
+
     /* Article display */
     .article { display: none; }
     .article.visible { display: block; }
@@ -149,6 +153,10 @@
         <textarea id="htmlInput" placeholder="Paste the page HTML source here..."></textarea>
         <button class="btn" id="parseBtn">Parse HTML</button>
       </div>
+      <p class="disclaimer">
+        URL fetching uses third-party CORS proxy services, so pasted article URLs and fetched page content may pass through those providers.
+        Use the paste raw HTML option if you do not want to send a URL through a proxy.
+      </p>
     </div>
 
     <div class="error-msg" id="errorMsg"></div>
@@ -239,9 +247,15 @@ function cleanNode(el) {
       if (ALLOWED_TAGS.has(child.tagName)) {
         const clean = document.createElement(child.tagName.toLowerCase());
         if (child.tagName === 'A' && child.href) {
-          clean.href = child.getAttribute('href');
-          clean.target = '_blank';
-          clean.rel = 'noopener';
+          const href = child.getAttribute('href') || '';
+          try {
+            const parsed = new URL(href, window.location.href);
+            if (['http:', 'https:', 'mailto:'].includes(parsed.protocol)) {
+              clean.href = parsed.href;
+              clean.target = '_blank';
+              clean.rel = 'noopener noreferrer';
+            }
+          } catch {}
         }
         clean.appendChild(cleanNode(child));
         frag.appendChild(clean);

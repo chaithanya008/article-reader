@@ -1,0 +1,29 @@
+{
+  "name": "article-reader",
+  "version": "1.0.0",
+  "description": "Extract and read clean article content from any news website",
+  "bin": {
+    "article-reader": "reader.js"
+  },
+  "files": [
+    "reader.js",
+    "README.md"
+  ],
+  "keywords": [
+    "article",
+    "reader",
+    "news",
+    "cli",
+    "scraper",
+    "readability"
+  ],
+  "author": "chaithanya008",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chaithanya008/article-reader.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
