@@ -1,7 +1,16 @@
 #!/usr/bin/env node
 
-const USER_AGENT =
+const CHROME_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const GOOGLEBOT_UA =
+  'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+
+const PAYWALL_HINTS = [
+  'subscribe to read', 'subscription required', 'sign in to continue',
+  'create an account', 'register to read', 'paywall', 'premium content',
+  'members only', 'subscriber-only', 'already a subscriber',
+  'continue reading with', 'unlock this article', 'get unlimited access',
+];
 
 // HTML entity decoding.
 const ENTITIES = {
@@ -175,6 +184,104 @@ function extractBody(html) {
   return content;
 }
 
+// Detect if fetched content looks paywalled.
+function looksPaywalled(html) {
+  const body = extractBody(html);
+  if (body.length < 200) return true;
+  const lower = html.toLowerCase();
+  return PAYWALL_HINTS.some((hint) => lower.includes(hint));
+}
+
+// Fetch a URL with a given UA and optional extra headers, return null on failure.
+async function tryFetch(url, ua, extraHeaders = {}) {
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': ua, Accept: 'text/html', ...extraHeaders },
+      redirect: 'follow',
+    });
+    if (!res.ok) return null;
+    return await res.text();
+  } catch {
+    return null;
+  }
+}
+
+// Build Google AMP cache URL from an article URL.
+function ampCacheUrl(url) {
+  try {
+    const u = new URL(url);
+    const ampDomain = u.hostname.replace(/-/g, '--').replace(/\./g, '-');
+    return `https://${ampDomain}.cdn.ampproject.org/c/s/${u.hostname}${u.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+// Check if a URL is a Medium article.
+function isMediumUrl(url) {
+  return /medium\.com|towardsdatascience\.com|betterprogramming\.pub|levelup\.gitconnected\.com/.test(url);
+}
+
+// Detect Google/cookie consent pages.
+function isConsentPage(html) {
+  const lower = html.toLowerCase();
+  return lower.includes('consent.google') ||
+    lower.includes('bevor sie zu google') ||
+    lower.includes('before you continue to google') ||
+    lower.includes('consent.youtube') ||
+    (lower.includes('cookie') && lower.includes('consent') && !lower.includes('<article'));
+}
+
+// Try multiple sources to get the best article content.
+async function fetchWithFallbacks(url) {
+  // 1. Direct fetch with Chrome UA.
+  let html = await tryFetch(url, CHROME_UA);
+  if (html && !looksPaywalled(html)) return { html, via: 'direct' };
+
+  // 2. Retry with Googlebot UA.
+  const botHtml = await tryFetch(url, GOOGLEBOT_UA);
+  if (botHtml && !looksPaywalled(botHtml)) return { html: botHtml, via: 'googlebot' };
+
+  // 3. Try Google AMP Cache.
+  const ampUrl = ampCacheUrl(url);
+  if (ampUrl) {
+    const ampHtml = await tryFetch(ampUrl, CHROME_UA);
+    if (ampHtml && ampHtml.length > 1000 && !looksPaywalled(ampHtml)) return { html: ampHtml, via: 'google-amp' };
+  }
+
+  // 4. Try archive.today (newest archived snapshot).
+  for (const domain of ['archive.ph', 'archive.today', 'archive.is']) {
+    const archiveHtml = await tryFetch(`https://${domain}/newest/${url}`, CHROME_UA);
+    if (archiveHtml && archiveHtml.length > 2000 && !looksPaywalled(archiveHtml)) {
+      return { html: archiveHtml, via: domain };
+    }
+  }
+
+  // 5. Try Google Cache.
+  const cacheUrl = `https://webcache.googleusercontent.com/search?q=cache:${encodeURIComponent(url)}&hl=en&gl=us`;
+  const cacheHtml = await tryFetch(cacheUrl, CHROME_UA);
+  if (cacheHtml && cacheHtml.length > 1000 && !isConsentPage(cacheHtml)) return { html: cacheHtml, via: 'google-cache' };
+
+  // 6. Try Wayback Machine (most recent snapshot).
+  try {
+    const wbRes = await fetch(`https://archive.org/wayback/available?url=${encodeURIComponent(url)}`, {
+      headers: { 'User-Agent': CHROME_UA },
+    });
+    if (wbRes.ok) {
+      const wbJson = await wbRes.json();
+      const snapUrl = wbJson?.archived_snapshots?.closest?.url;
+      if (snapUrl) {
+        const wbHtml = await tryFetch(snapUrl, CHROME_UA);
+        if (wbHtml && wbHtml.length > 1000) return { html: wbHtml, via: 'wayback' };
+      }
+    }
+  } catch {}
+
+  // 7. Return whatever we got (even if paywalled).
+  if (html) return { html, via: 'direct (paywalled)' };
+  throw new Error('Could not fetch article from any source.');
+}
+
 // Main CLI entrypoint.
 async function main() {
   const url = process.argv[2];
@@ -192,17 +299,7 @@ async function main() {
   }
 
   try {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': USER_AGENT, Accept: 'text/html' },
-      redirect: 'follow',
-    });
-
-    if (!res.ok) {
-      console.error(`Error: HTTP ${res.status} ${res.statusText}`);
-      process.exit(1);
-    }
-
-    const html = await res.text();
+    const { html, via } = await fetchWithFallbacks(url);
     const width = Math.min(process.stdout.columns || 72, 80);
     const line = '='.repeat(width);
     const thin = '-'.repeat(width);
@@ -219,6 +316,7 @@ async function main() {
     if (author) console.log(`Author: ${author}`);
     if (date) console.log(`Date:   ${date}`);
     console.log(`Source: ${url}`);
+    if (via !== 'direct') console.log(`Via:    ${via}`);
     console.log(thin);
     console.log();
     console.log(body || '(Could not extract article body)');

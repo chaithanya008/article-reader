@@ -96,8 +96,30 @@
     .error-msg.visible { display: block; }
 
     .disclaimer {
-      margin-top: 0.75rem; font-size: 0.85rem; color: var(--muted);
+      margin-top: 0.75rem; font-size: 0.8rem; color: var(--muted);
+      background: color-mix(in srgb, var(--muted) 8%, transparent);
+      border-radius: 6px; padding: 0.6rem 0.8rem; line-height: 1.5;
     }
+    .disclaimer strong { color: var(--fg); font-weight: 500; }
+
+    .fallbacks { display: none; margin-bottom: 1rem; }
+    .fallbacks.visible { display: block; }
+    .fallbacks-label {
+      font-size: 0.9rem; color: var(--muted); margin-bottom: 0.6rem;
+    }
+    .fallback-btns { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .fallback-btn {
+      padding: 0.5rem 0.9rem; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--card); color: var(--fg); font-size: 0.85rem;
+      text-decoration: none; transition: border-color .2s, background .2s;
+    }
+    .fallback-btn:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+    .footer {
+      margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--border);
+      text-align: center; font-size: 0.8rem; color: var(--muted);
+    }
+    .footer .counter { font-variant-numeric: tabular-nums; }
 
     /* Article display */
     .article { display: none; }
@@ -154,12 +176,21 @@
         <button class="btn" id="parseBtn">Parse HTML</button>
       </div>
       <p class="disclaimer">
-        URL fetching uses third-party CORS proxy services, so pasted article URLs and fetched page content may pass through those providers.
-        Use the paste raw HTML option if you do not want to send a URL through a proxy.
+        <strong>Note:</strong> URL fetching routes through third-party CORS proxies.
+        Article URLs and page content may pass through those providers.
+        Use <em>paste raw HTML</em> to keep everything local.
       </p>
     </div>
 
     <div class="error-msg" id="errorMsg"></div>
+    <div class="fallbacks" id="fallbacks">
+      <div class="fallbacks-label">Couldn't get full article. Try one of these:</div>
+      <div class="fallback-btns">
+        <a class="fallback-btn" id="fb-rp" href="#" target="_blank" rel="noopener">removepaywall.com</a>
+        <a class="fallback-btn" id="fb-archive" href="#" target="_blank" rel="noopener">archive.ph</a>
+        <a class="fallback-btn" id="fb-smry" href="#" target="_blank" rel="noopener">smry.ai</a>
+      </div>
+    </div>
     <div class="status" id="status"><span class="spinner"></span> Fetching article...</div>
 
     <div class="article" id="article">
@@ -172,6 +203,10 @@
       </div>
       <div class="article-body" id="artBody"></div>
       <div class="source-link">Source: <a id="artSource" href="#" target="_blank" rel="noopener"></a></div>
+    </div>
+
+    <div class="footer">
+      <span class="counter" id="viewCount"></span>
     </div>
   </div>
 
@@ -247,17 +282,38 @@ async function tryProxy(url) {
   return null;
 }
 
+function ampCacheUrl(url) {
+  try {
+    const u = new URL(url);
+    const ampDomain = u.hostname.replace(/-/g, '--').replace(/\./g, '-');
+    return `https://${ampDomain}.cdn.ampproject.org/c/s/${u.hostname}${u.pathname}`;
+  } catch { return null; }
+}
+
 async function fetchHTML(url) {
   // 1. Direct fetch via proxy.
   let html = await tryProxy(url);
   if (html && !looksPaywalled(html)) return html;
 
-  // 2. Try Google Cache via proxy.
+  // 2. Try Google AMP Cache via proxy.
+  const ampUrl = ampCacheUrl(url);
+  if (ampUrl) {
+    const ampHtml = await tryProxy(ampUrl);
+    if (ampHtml && ampHtml.length > 1000 && !looksPaywalled(ampHtml)) return ampHtml;
+  }
+
+  // 3. Try archive.today via proxy.
+  for (const domain of ['archive.ph', 'archive.today', 'archive.is']) {
+    const archiveHtml = await tryProxy(`https://${domain}/newest/${url}`);
+    if (archiveHtml && archiveHtml.length > 2000 && !looksPaywalled(archiveHtml)) return archiveHtml;
+  }
+
+  // 4. Try Google Cache via proxy.
   const cacheUrl = `https://webcache.googleusercontent.com/search?q=cache:${encodeURIComponent(url)}&hl=en&gl=us`;
   const cacheHtml = await tryProxy(cacheUrl);
   if (cacheHtml && cacheHtml.length > 1000 && !isConsentPage(cacheHtml)) return cacheHtml;
 
-  // 3. Try Wayback Machine via proxy.
+  // 5. Try Wayback Machine via proxy.
   try {
     const wbRes = await fetch(PROXIES[0].url(`https://archive.org/wayback/available?url=${encodeURIComponent(url)}`));
     if (wbRes.ok) {
@@ -271,7 +327,7 @@ async function fetchHTML(url) {
     }
   } catch {}
 
-  // 4. Return whatever we got, even if paywalled.
+  // 6. Return whatever we got, even if paywalled.
   if (html) return html;
   throw new Error('All sources failed. Try pasting the HTML directly.');
 }
@@ -397,17 +453,36 @@ function parseArticle(htmlStr) {
   return { title, author, date, body: bodyHTML };
 }
 
+// ── Fallback links ───────────────────────────────────────────────
+const fallbacksEl = document.getElementById('fallbacks');
+
+function showFallbacks(url) {
+  document.getElementById('fb-rp').href = `https://www.removepaywall.com/search?url=${encodeURIComponent(url)}`;
+  document.getElementById('fb-archive').href = `https://archive.ph/newest/${url}`;
+  document.getElementById('fb-smry').href = `https://smry.ai/${encodeURIComponent(url)}`;
+  fallbacksEl.classList.add('visible');
+}
+
+function hideFallbacks() {
+  fallbacksEl.classList.remove('visible');
+}
+
 // ── Render ────────────────────────────────────────────────────────
-function showError(msg) {
+function showError(msg, url) {
   errorEl.textContent = msg;
   errorEl.classList.add('visible');
   statusEl.classList.remove('visible');
   articleEl.classList.remove('visible');
+  if (url) showFallbacks(url);
 }
 
 function showArticle(data, url) {
   errorEl.classList.remove('visible');
   statusEl.classList.remove('visible');
+  hideFallbacks();
+
+  const bodyText = (data.body || '').replace(/<[^>]+>/g, '').trim();
+  const isWeak = bodyText.length < 300;
 
   document.getElementById('artTitle').textContent = data.title || '(No title found)';
   document.getElementById('artAuthor').textContent = data.author ? `By ${data.author}` : '';
@@ -423,6 +498,9 @@ function showArticle(data, url) {
     srcLink.parentElement.style.display = 'none';
   }
 
+  // Show fallback buttons if content looks incomplete
+  if (isWeak && url) showFallbacks(url); else hideFallbacks();
+
   articleEl.classList.add('visible');
   articleEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -435,6 +513,7 @@ async function handleFetch() {
 
   errorEl.classList.remove('visible');
   articleEl.classList.remove('visible');
+  hideFallbacks();
   statusEl.classList.add('visible');
   fetchBtn.disabled = true;
 
@@ -443,7 +522,7 @@ async function handleFetch() {
     const data = parseArticle(html);
     showArticle(data, url);
   } catch (err) {
-    showError(err.message);
+    showError(err.message, url);
   } finally {
     fetchBtn.disabled = false;
   }
@@ -463,6 +542,18 @@ parseBtn.addEventListener('click', () => {
     showError('Failed to parse HTML: ' + err.message);
   }
 });
+
+// ── View counter from GoatCounter ────────────────────────────────
+(async () => {
+  try {
+    const res = await fetch('https://chaithanya789.goatcounter.com/counter/' + encodeURIComponent('/'));
+    if (res.ok) {
+      const data = await res.json();
+      const el = document.getElementById('viewCount');
+      if (el && data.count) el.textContent = `${Number(data.count).toLocaleString()} views`;
+    }
+  } catch {}
+})();
 </script>
 <script data-goatcounter="https://chaithanya789.goatcounter.com/count"
         async src="//gc.zgo.at/count.js"></script>
